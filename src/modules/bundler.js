@@ -5,6 +5,8 @@ const asar = require('asar');
 const config = require('./config');
 const constants = require('../constants');
 const utils = require('../utils');
+const peLibraryCjs = require('pe-library/cjs');
+const reseditCjs = require('resedit/cjs');
 
 async function createAsarFile() {
     utils.log(`Generating ${constants.files.resourceFile}...`);
@@ -32,6 +34,67 @@ async function createAsarFile() {
     await asar.createPackage('.tmp', `dist/${binaryName}/${constants.files.resourceFile}`);
 }
 
+/**
+ * Add metadata info to Win32 PE binary
+ */
+async function setBinaryMetadata(sourceFilename, destFilename) {
+
+    utils.log(`Setting resources in Win32 binary --> ${destFilename}...`);
+
+    // load and parse data
+    const DEFAULT_LANGID = 1033;
+    const data = fs.readFileSync(sourceFilename);
+    const resedit = await reseditCjs.load();
+    const peLibrary = await peLibraryCjs.load();
+
+    // load original binary
+    const exe = peLibrary.NtExecutable.from(data);
+    const res = peLibrary.NtExecutableResource.from(exe);
+
+    // get binary metadata from neutralino configFile
+    const appConfig = config.get();
+    const binaryMetadata = appConfig.cli?.binaryMetadata ?? {};
+    binaryMetadata.version = (appConfig.version ?? '0.0.0.0').split('.').map(v => +v);
+
+    // set icon
+    if(binaryMetadata.icon) {
+        // test for .ico extension
+        if(!binaryMetadata.icon.toLowerCase().endsWith('.ico')) {
+            utils.warn(`${binaryMetadata.icon} is not a valid Win32 ico, it must be in '*.ico' format`);
+        }
+        else {
+            // load icon data from file (making its path relative)
+            const iconFile = resedit.Data.IconFile.from(fs.readFileSync(`./${binaryMetadata.icon}`));
+            resedit.Resource.IconGroupEntry.replaceIconsForResource(
+                res.entries,
+                0,
+                DEFAULT_LANGID,
+                iconFile.icons.map((item) => item.data)
+            );
+        }
+    }
+
+    // version info
+    const vi = resedit.Resource.VersionInfo.createEmpty();
+
+    // set versions
+    vi.setProductVersion(...binaryMetadata.version);
+    vi.setFileVersion(...binaryMetadata.version);
+    vi.setStringValues(
+        { lang: DEFAULT_LANGID, codepage: 1200 },
+        {
+            ProductName: binaryMetadata.name ?? '',
+            FileDescription: binaryMetadata.description ?? '',
+            LegalCopyright: binaryMetadata.copyright ?? '',
+        }
+    );
+    vi.outputToResourceEntries(res.entries);
+
+    // write destination binary
+    res.outputResource(exe);
+    fs.writeFileSync(destFilename, Buffer.from(exe.generate()));
+}
+
 module.exports.bundleApp = async (isRelease, copyStorage) => {
     let configObj = config.get();
     let binaryName = configObj.cli.binaryName;
@@ -44,7 +107,15 @@ module.exports.bundleApp = async (isRelease, copyStorage) => {
                 let originalBinaryFile = constants.files.binaries[platform][arch];
                 let destinationBinaryFile = originalBinaryFile.replace('neutralino', binaryName);
                 if(fse.existsSync(`bin/${originalBinaryFile}`)) {
-                    fse.copySync(`bin/${originalBinaryFile}`, `dist/${binaryName}/${destinationBinaryFile}`);
+                    let originalFullname = `bin/${originalBinaryFile}`;
+                    let destinationFullname = `dist/${binaryName}/${destinationBinaryFile}`;
+                    // Win32 binaries support PE resources
+                    if(platform === 'win32') {
+                        await setBinaryMetadata(originalFullname, destinationFullname);
+                    }
+                    else {
+                        fse.copySync(originalFullname, destinationFullname);
+                    }
                 }
             }
         }
