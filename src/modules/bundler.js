@@ -8,9 +8,8 @@ const utils = require('../utils');
 const peLibraryCjs = require('pe-library/cjs');
 const reseditCjs = require('resedit/cjs');
 
-async function createAsarFile() {
+async function createAsarFile(configObj) {
     utils.log(`Generating ${constants.files.resourceFile}...`);
-    const configObj = config.get();
     const resourcesDir = utils.trimPath(configObj.cli.resourcesPath);
     const extensionsDir = utils.trimPath(configObj.cli.extensionsPath);
     const clientLibrary = configObj.cli.clientLibrary ? utils.trimPath(configObj.cli.clientLibrary)
@@ -37,7 +36,7 @@ async function createAsarFile() {
 /**
  * Add metadata info to Win32 PE binary
  */
-async function setBinaryMetadata(sourceFilename, destFilename) {
+async function setBinaryMetadata(configObj, sourceFilename, destFilename) {
 
     utils.log(`Setting resources in Win32 binary --> ${destFilename}...`);
 
@@ -52,9 +51,8 @@ async function setBinaryMetadata(sourceFilename, destFilename) {
     const res = peLibrary.NtExecutableResource.from(exe);
 
     // get binary metadata from neutralino configFile
-    const appConfig = config.get();
-    const binaryMetadata = appConfig.cli?.binaryMetadata ?? {};
-    binaryMetadata.version = (appConfig.version ?? '0.0.0.0').split('.').map(v => +v);
+    const binaryMetadata = configObj.cli?.binaryMetadata ?? {};
+    binaryMetadata.version = (configObj.version ?? '0.0.0.0').split('.').map(v => +v);
 
     // set icon
     if(binaryMetadata.icon) {
@@ -74,10 +72,8 @@ async function setBinaryMetadata(sourceFilename, destFilename) {
         }
     }
 
-    // version info
+    // set version info
     const vi = resedit.Resource.VersionInfo.createEmpty();
-
-    // set versions
     vi.setProductVersion(...binaryMetadata.version);
     vi.setFileVersion(...binaryMetadata.version);
     vi.setStringValues(
@@ -90,6 +86,18 @@ async function setBinaryMetadata(sourceFilename, destFilename) {
     );
     vi.outputToResourceEntries(res.entries);
 
+    // embed resources.neu archive into PE binary
+    if(binaryMetadata.embedResourcesArchive) {
+        utils.log(`Embedding ${constants.files.resourceFile} into Win32 PE binary`);
+        const resourcesContent = fs.readFileSync(`dist/${configObj.cli.binaryName}/${constants.files.resourceFile}`);
+        res.entries.push({
+            type: 10,       // raw data => RT_RCDATA
+            id: 1000,       // fixed ID of optionally included resources.neu archive
+            lang: DEFAULT_LANGID,
+            bin: resourcesContent,
+        });
+    }
+
     // write destination binary
     res.outputResource(exe);
     fs.writeFileSync(destFilename, Buffer.from(exe.generate()));
@@ -99,7 +107,7 @@ module.exports.bundleApp = async (isRelease, copyStorage) => {
     let configObj = config.get();
     let binaryName = configObj.cli.binaryName;
     try {
-        await createAsarFile();
+        await createAsarFile(configObj);
         utils.log('Copying binaries...');
 
         for(let platform in constants.files.binaries) {
@@ -111,7 +119,7 @@ module.exports.bundleApp = async (isRelease, copyStorage) => {
                     let destinationFullname = `dist/${binaryName}/${destinationBinaryFile}`;
                     // Win32 binaries support PE resources
                     if(platform === 'win32') {
-                        await setBinaryMetadata(originalFullname, destinationFullname);
+                        await setBinaryMetadata(configObj, originalFullname, destinationFullname);
                     }
                     else {
                         fse.copySync(originalFullname, destinationFullname);
